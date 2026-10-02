@@ -1,0 +1,189 @@
+@searchUrl = 
+@apiVersion = 2026-05-01-preview
+@searchApiKey = 
+@storageConnectionString = 
+@azureOpenAiUrl = 
+@azureOpenAiApiKey = 
+@knowledgeSourceName = fireworks-acl-ks
+@knowledgeBaseName = fireworks-acl-kb
+@indexName = fireworks-acl-ks-index
+
+@indexerName = fireworks-acl-ks-indexer
+
+# ACLでフィルターされたリクエストを実行する前に、次のコマンドを実行してトークンをここへ貼り付けます。
+# 実行コマンド: az account get-access-token --scope https://search.azure.com/.default --query accessToken -o tsv
+@userAccessToken = 
+
+
+### 1. Azure Blob ナレッジソースの作成
+PUT {{searchUrl}}/knowledgesources/{{knowledgeSourceName}}?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+Content-Type: application/json
+ 
+{
+    "name": "{{knowledgeSourceName}}",
+    "kind": "azureBlob",
+    "description": "ACLを考慮したナレッジソース",
+    "azureBlobParameters": {
+        "connectionString": "{{storageConnectionString}}",
+        "containerName": "fireworks-data",
+        "folderPath": null,
+        "isADLSGen2": true,
+        "ingestionParameters": {
+            "identity": null,
+            "embeddingModel": {
+                "kind": "azureOpenAI",
+                "azureOpenAIParameters": {
+                    "deploymentId": "text-embedding-3-large",
+                    "modelName": "text-embedding-3-large",
+                    "resourceUri": "{{azureOpenAiUrl}}",
+                    "apiKey": "{{azureOpenAiApiKey}}"
+                }
+            },
+            "chatCompletionModel": null,
+            "disableImageVerbalization": true,
+            "ingestionSchedule": null,
+             "ingestionPermissionOptions": [
+                "userIds","groupIds"
+                           ],
+            "contentExtractionMode": "minimal"
+        }
+    }
+}
+###
+
+### 2. ナレッジベースの作成または更新
+PUT {{searchUrl}}/knowledgebases/{{knowledgeBaseName}}?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+Content-Type: application/json
+
+{
+    "name": "{{knowledgeBaseName}}",
+    "description": "ACLを考慮した花火大会ナレッジベース",
+    "retrievalInstructions": "花火大会に関する質問には、ナレッジソースの情報だけを根拠として回答してください。",
+    "answerInstructions": "日本語で簡潔に回答し、該当する花火大会の情報を示してください。",
+    "outputMode": "answerSynthesis",
+    "knowledgeSources": [
+        {
+            "name": "{{knowledgeSourceName}}"
+        }
+    ],
+    "models": [
+        {
+            "kind": "azureOpenAI",
+            "azureOpenAIParameters": {
+                "resourceUri": "{{azureOpenAiUrl}}",
+                "apiKey": "{{azureOpenAiApiKey}}",
+                "deploymentId": "gpt-5.4-mini",
+                "modelName": "gpt-5.4-mini"
+            }
+        }
+    ],
+    "retrievalReasoningEffort": {
+        "kind": "low"
+    }
+}
+###
+
+### 3. ナレッジソースの取り込み状態とドキュメント単位のエラー確認
+GET {{searchUrl}}/knowledgesources/{{knowledgeSourceName}}/status?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+Content-Type: application/json
+###
+
+
+### 4. ACLメタデータの再同期を予約（resync）
+POST {{searchUrl}}/indexers/{{indexerName}}/resync?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+Content-Type: application/json
+
+{
+    "options": [
+        "permissions"
+    ]
+}
+###
+
+### 5. インデクサーを起動して再同期を実行（run）
+POST {{searchUrl}}/indexers/{{indexerName}}/run?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+###
+
+### 6. 再同期後のインデクサー状態を確認（status）
+GET {{searchUrl}}/indexers/{{indexerName}}/status?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+###
+
+### 7. 対照テスト: ユーザートークンなしでインデックスを検索
+POST {{searchUrl}}/indexes/{{indexName}}/docs/search?api-version={{apiVersion}}
+api-key: {{searchApiKey}}
+Content-Type: application/json
+
+{
+    "search": "*",
+    "count": true,
+    "top": 5,
+    "select": "blob_url,snippet"
+}
+###
+
+### 8. 管理者テスト: 権限フィルターを回避してインデックスを検索
+# サインイン中のユーザーには Search Index Data Contributor が必要です。ここでは x-ms-query-source-authorization を追加しません。
+POST {{searchUrl}}/indexes/{{indexName}}/docs/search?api-version={{apiVersion}}
+Authorization: Bearer {{userAccessToken}}
+x-ms-enable-elevated-read: true
+Content-Type: application/json
+
+{
+    "search": "*",
+    "count": true,
+    "top": 5,
+    "select": "blob_url,snippet"
+}
+###
+
+### 9. 一般情報をACL付きでナレッジベースから検索
+POST {{searchUrl}}/knowledgebases/{{knowledgeBaseName}}/retrieve?api-version={{apiVersion}}
+Authorization: Bearer {{userAccessToken}}
+x-ms-query-source-authorization: {{userAccessToken}}
+Content-Type: application/json
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "東京で8月に開催されるおすすめの花火大会を教えてください。"
+                }
+            ]
+        }
+    ],
+    "maxOutputDocuments": 5,
+    "includeActivity": true
+}
+###
+
+### 10. staff-only情報をACL付きでナレッジベースから検索
+POST {{searchUrl}}/knowledgebases/{{knowledgeBaseName}}/retrieve?api-version={{apiVersion}}
+Authorization: Bearer {{userAccessToken}}
+x-ms-query-source-authorization: {{userAccessToken}}
+Content-Type: application/json
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "花火大会スタッフ用セキュリティマニュアルで、16時にすることは何と書いてある？"
+                }
+            ]
+        }
+    ],
+    "maxOutputDocuments": 5,
+    "includeActivity": true
+}
+###
